@@ -41,70 +41,24 @@
               </a-radio-group>
             </div>
           </div>
-          <div v-if="videoInfo.page && videoInfo.page.length > 1" class="fr ac jsb mt16">
-            <div>这是一个多P视频，请选择</div>
-            <div>
-              <a-checkbox @change="onAllSelectedChange" v-model:checked="allSelected">
-                全选
-              </a-checkbox>
-              <a-checkbox v-model:checked="saveFilePrefix">
-                保留[P?]
-              </a-checkbox>
+          <template v-if="videoInfo.page && videoInfo.page.length > 1">
+            <div class="fr ac jsb mt16">
+              <div>选择视频</div>
+              <div>
+                <a-checkbox :checked="allSelected" @change="onAllSelectedChange">全选</a-checkbox>
+                <a-checkbox v-model:checked="saveFilePrefix">保留[P?]</a-checkbox>
+              </div>
             </div>
-          </div>
-          <!-- <div v-if="videoInfo.page[0]?.longTitle" class="fr ac jsb mt16">
-            <div>&nbsp;</div>
-            <div>
-              <a-checkbox v-model:checked="showLongTitle">
-                显示长标题
-              </a-checkbox>
-            </div>
-          </div> -->
-          <template v-if="videoList.length> 1">
-          <!-- {{ selected }} -->
-            <a-tabs v-model:activeKey="videoListActive">
-              <a-tab-pane
-                v-for="(videoListItem, tabIndex) in videoList"
-                :key="`videoList-${tabIndex}`"
-                :tab="videoListItem.title">
-                <div class="fr ac warp mt16 video-content">
-                  <template v-for="(item, index) in videoListItem.data" :key="`videoList-${tabIndex}-${index}`">
-                    <a-tooltip>
-                        <template #title>
-                          {{ item.longTitle || item.title }}
-                        </template>
-                      <div
-                        :class="['video-item', selected.includes(item.page) ? 'active' : '',
-                        store.baseStore().loginStatus !== 2 && item.badge=== '会员' ? 'disable' : '' ]"
-                        @click="toggle(item.page, store.baseStore().loginStatus !== 2 && item.badge=== '会员')">
-                        <span class="badge" :data-content="item.badge">{{item.badge}}</span>
-                        <!-- <span class="ep-title" v-if="Boolean(item.epTitle)">{{ item.epTitle }}</span> -->
-                        <span class="ellipsis-1">{{ item.showTitle || item.title }}</span>
-                      </div>
-                    </a-tooltip>
-                  </template>
-                </div>
+            <a-input v-model:value="keyword" class="mt8" placeholder="输入关键词，高亮匹配的视频" allow-clear />
+            <div v-if="keyword.trim()" class="search-count">匹配 {{ matchCount }} 个视频</div>
+            <a-tabs v-if="videoList.length > 1" v-model:activeKey="videoListActive">
+              <a-tab-pane v-for="(group, index) in videoList" :key="`videoList-${index}`" :tab="keyword.trim() ? `${group.title} (${group.data.filter(item => matchesKeyword(item)).length})` : group.title">
+                <VideoPageList :pages="group.data" :selected="selected" :current-page="currentPage" :keyword="keyword"
+                  :is-vip="store.baseStore().loginStatus === 2" @toggle="toggle" />
               </a-tab-pane>
             </a-tabs>
-          </template>
-          <template v-else>
-            <div v-if="videoInfo.page && videoInfo.page.length > 1" class="fr ac warp mt16 video-content">
-              <template v-for="(item, index) in videoInfo.page" :key="`main-${index}`">
-                <a-tooltip>
-                    <template #title>
-                      {{ item.longTitle || item.title }}
-                    </template>
-                  <div
-                    :class="['video-item', selected.includes(item.page) ? 'active' : '',
-                    store.baseStore().loginStatus !== 2 && item.badge=== '会员' ? 'disable' : '' ]"
-                    @click="toggle(item.page, store.baseStore().loginStatus !== 2 && item.badge=== '会员')">
-                    <span class="badge" :data-content="item.badge">{{item.badge}}</span>
-                    <!-- <span class="ep-title" v-if="Boolean(item.epTitle)">{{ item.epTitle }}</span> -->
-                    <span class="ellipsis-1">{{ item.title }}</span>
-                  </div>
-                </a-tooltip>
-              </template>
-            </div>
+            <VideoPageList v-else :pages="videoInfo.page" :selected="selected" :current-page="currentPage" :keyword="keyword"
+              :is-vip="store.baseStore().loginStatus === 2" @toggle="toggle" />
           </template>
         </div>
       </a-spin>
@@ -120,7 +74,9 @@ import { getDownloadList, addDownload } from '../../core/bilibili'
 import { userQuality } from '../../assets/data/quality'
 import { videoData } from '../../assets/data/default'
 import { STATUS } from '../../assets/data/status'
-import type { TaskData, VideoData } from '../../type'
+import type { TaskData, VideoData, Page } from '../../type'
+import VideoPageList from './VideoPageList.vue'
+import { findCurrentPage, highlightParts } from './pageUtils'
 import type { CheckboxChangeEvent } from 'ant-design-vue/es/checkbox/interface'
 
 const visible = ref<boolean>(false)
@@ -128,7 +84,12 @@ const confirmLoading = ref<boolean>(false)
 const quality = ref<number>(-1)
 const videoInfo = ref<VideoData>(videoData)
 const selected = ref<number[]>([])
-const allSelected = ref<boolean>(false)
+const keyword = ref('')
+const currentPage = computed(() => findCurrentPage(videoInfo.value)?.page ?? null)
+const selectablePages = computed(() => videoInfo.value.page.filter(item => store.baseStore().loginStatus === 2 || item.badge !== '会员'))
+const allSelected = computed(() => selectablePages.value.length > 0 && selectablePages.value.every(item => selected.value.includes(item.page)))
+const matchesKeyword = (item: Page) => highlightParts(item.title || item.showTitle, keyword.value).some(part => part.match)
+const matchCount = computed(() => videoInfo.value.page.filter(matchesKeyword).length)
 const router = useRouter()
 const saveFilePrefix = ref<boolean>(true)
 const videoListActive = ref('videoList-0')
@@ -137,8 +98,8 @@ const videoList = computed(() => {
   if (!Array.isArray(videoInfo.value.page) || videoInfo.value.page.length <= 1) {
     return []
   }
-  const res = []
-  const temp: AnyObject = {}
+  const res: { title: string, data: Page[] }[] = []
+  const temp: Record<string, Page[]> = {}
   videoInfo.value.page.forEach(item => {
     const sectionsTitle = item.sectionsTitle || '正片'
     if (!Array.isArray(temp[sectionsTitle])) {
@@ -161,7 +122,7 @@ const cancel = () => {
   confirmLoading.value = false
   quality.value = -1
   selected.value = []
-  allSelected.value = false
+  keyword.value = ''
 }
 
 function showConfirm () {
@@ -230,11 +191,15 @@ const handleDownload = async () => {
 
 const open = (data: VideoData) => {
   saveFilePrefix.value = true
+  selected.value = []
+  keyword.value = ''
   const quality = userQuality[store.baseStore().loginStatus]
   // 过滤掉 不合法的清晰度
   data.qualityOptions = data.qualityOptions.filter((item) => quality.includes(item.value))
   videoInfo.value = data
   visible.value = true
+  const currentGroup = videoList.value.findIndex(group => group.data.some(item => item.page === currentPage.value))
+  videoListActive.value = `videoList-${Math.max(currentGroup, 0)}`
   // 如果是单p，则默认选中
   if (videoInfo.value.page.length === 1) {
     selected.value.push(videoInfo.value.page[0].page)
@@ -242,21 +207,10 @@ const open = (data: VideoData) => {
 }
 
 const onAllSelectedChange = (e: CheckboxChangeEvent) => {
-  allSelected.value = e.target.checked
-  selected.value = []
-  if (e.target.checked) {
-    videoInfo.value.page.forEach((element) => {
-      if (element.badge === '会员') {
-        if (store.baseStore().loginStatus === 2) selected.value.push(element.page)
-      } else {
-        selected.value.push(element.page)
-      }
-    })
-  }
+  selected.value = e.target.checked ? selectablePages.value.map(item => item.page) : []
 }
 
-const toggle = (page: number, disable: boolean) => {
-  if (disable) return
+const toggle = (page: number) => {
   const index = selected.value.indexOf(page)
   if (index === -1) {
     selected.value.push(page)
@@ -304,76 +258,10 @@ defineExpose({
       width: 358px;
     }
   }
-  .video-content {
-    justify-content: flex-start;
-  }
-  .video-item{
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    box-sizing: border-box;
-    // width: 100px;
-    height: 50px;
-    max-width: 140px;
-    min-width: 50px;
-    border: 1px solid #eeeeee;
-    background: #ffffff;
-    margin: 0px 18px 18px 0px;
-    padding: 8px;
-    cursor: pointer;
-    // overflow: hidden;
-    border-radius: 6px;
-    user-select: none;
-    position: relative;
-    &:hover {
-      background-color: @primary-color3;
-      border: 1px solid @primary-color2;
-      color: @primary-color2;
-    }
-    &.active{
-      color: #ffffff;
-      background: @primary-color2;
-      border: 1px solid @primary-color2;
-    }
-    &.disable {
-      cursor: no-drop;
-      color: #ddd;
-      background-color: #fff;
-      border: 1px solid #ddd;
-    }
-    .badge {
-      position: absolute;
-      font-size: 12px;
-      background: @primary-color;
-      right: -1px;
-      top: -1px;
-      color:#ffffff;
-      padding: 0 4px;
-      border-bottom-left-radius: 10px;
-      border-top-right-radius: 6px;
-      &[data-content="限免"] {
-        background-color: rgb(255, 127, 36);
-      }
-      &[data-content="预告"] {
-        background-color: rgb(0, 192, 255);
-      }
-    }
-    .ep-title {
-      position: absolute;
-      font-size: 12px;
-      color: #ffffff;
-      background: @primary-color2;
-      top: -12px;
-      left: -10px;
-      padding: 0 4px;
-      border-radius: 4px;
-      max-width: 80px;
-      overflow: hidden;
-      height: 20px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
+  .search-count {
+    margin-top: 6px;
+    color: #777;
+    font-size: 12px;
   }
   .err-msg {
     text-align: center;
