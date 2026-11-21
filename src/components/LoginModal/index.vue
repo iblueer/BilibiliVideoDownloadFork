@@ -5,22 +5,23 @@
     :closable="false"
     :maskClosable="false"
     title="请登录Bilibili"
-    :okText="handleOkText()"
-    :okButtonProps="{ disabled: (activeTab === 1 && scanStatus !== 2 ) || (activeTab === 2 && !IPTSESSDATA) }"
+    okText="确认登录"
+    :okButtonProps="{ disabled: !IPTSESSDATA, style: { display: activeTab === 1 ? 'none' : undefined } }"
     cancelText="不登录"
     @cancel="notLogin"
-    @ok="login">
+    @ok="login(IPTSESSDATA)">
     <a-tabs v-model:activeKey="activeTab" centered>
       <a-tab-pane :key="1" tab="扫码登录" force-render>
         <div class="login-box">
           <div class="qr-modal" v-if="!countDown && !isQrLoad">
-            <SyncOutlined class="refresh" @click="createQrcode" />
+            <SyncOutlined class="refresh" @click="refreshQrcode" />
           </div>
           <div class="qr-modal" v-if="isQrLoad" >
             <LoadingOutlined class="loading" />
           </div>
           <img v-if="imageBase64" :src="imageBase64" alt="" />
         </div>
+        <div class="scan-status">{{ scanStatus === 1 ? '已扫码，请在手机上确认' : '请使用哔哩哔哩客户端扫码' }}</div>
       </a-tab-pane>
       <a-tab-pane :key="2" tab="手动输入">
         <div class="login-box">
@@ -50,10 +51,9 @@ import { checkLogin } from '../../core/bilibili'
 import { store } from '../../store'
 
 const visible = ref<boolean>(false)
-// 0 未扫码 1 已扫码 2 已确认
+// 0 未扫码 1 已扫码
 const scanStatus = ref<number>(0)
 const activeTab = ref<number>(1)
-const QRSESSDATA = ref<string>('')
 const IPTSESSDATA = ref<string>('')
 const imageBase64 = ref<string>('')
 const oauthKey = ref<string>('')
@@ -63,18 +63,20 @@ const isQrLoad = ref(false)
 let timer: number | null = null
 let checkStatusTimer: number | null = null
 
-const handleOkText = () => {
-  const okText = ['未扫码', '已扫码', '确认登录']
-  if (activeTab.value === 1) {
-    return okText[scanStatus.value]
-  } else {
-    return '确认登录'
-  }
-}
-
 const open = async () => {
   visible.value = true
+  scanStatus.value = 0
+  isCheck.value = true
   await createQrcode()
+  if (isCheck.value && visible.value) checkScanStatus(oauthKey.value)
+}
+
+const refreshQrcode = async () => {
+  isCheck.value = false
+  if (typeof checkStatusTimer === 'number') clearTimeout(checkStatusTimer)
+  scanStatus.value = 0
+  await createQrcode()
+  if (!visible.value) return
   isCheck.value = true
   checkScanStatus(oauthKey.value)
 }
@@ -84,10 +86,8 @@ const notLogin = () => {
   hide()
 }
 
-const login = async () => {
-  // 获取SESSDATA
-  const SESSDATA = activeTab.value === 1 ? QRSESSDATA.value : IPTSESSDATA.value
-  if (activeTab.value === 1 && !SESSDATA) {
+const login = async (SESSDATA: string) => {
+  if (!SESSDATA) {
     message.error('请输入SESSDATA')
     return
   }
@@ -104,10 +104,8 @@ const login = async () => {
 
 const hide = () => {
   isCheck.value = false
-  setTimeout(() => {
-    if (typeof timer === 'number') clearInterval(timer)
-    timer = null
-  }, 1000)
+  if (typeof timer === 'number') clearInterval(timer)
+  timer = null
   if (typeof checkStatusTimer === 'number') clearTimeout(checkStatusTimer)
   visible.value = false
 }
@@ -146,22 +144,29 @@ const createQrcode = async () => {
   }, 1000)
 }
 const QRCodeAPI = 'https://passport.bilibili.com/x/passport-login/web/qrcode/poll'
-const checkScanStatus = (oauthKey: string) => {
-  run(oauthKey)
-  async function run (oauthKey: string) {
+const checkScanStatus = (key: string) => {
+  run(key)
+  async function run (key: string) {
     if (!isCheck.value) return
-    const { body, headers: resHeader } = await window.electron.got(QRCodeAPI, {
+    const result = await window.electron.got(QRCodeAPI, {
       method: 'GET',
       responseType: 'json',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded'
       },
       searchParams: {
-        qrcode_key: oauthKey
+        qrcode_key: key
       }
     }).catch((e: unknown) => {
       console.log(e)
+      return null
     })
+    if (!isCheck.value || !visible.value || key !== oauthKey.value) return
+    if (!result) {
+      checkStatusTimer = window.setTimeout(() => run(key), 3000)
+      return
+    }
+    const { body, headers: resHeader } = result
     const defaultData = {
       code: -999999
     }
@@ -176,12 +181,12 @@ const checkScanStatus = (oauthKey: string) => {
         scanStatus.value = 0
       }
       // 86090：二维码已扫码未确认
-      if (body.data === 86090) {
+      if (data.code === 86090) {
         scanStatus.value = 1
       }
       if (visible.value) {
         checkStatusTimer = window.setTimeout(() => {
-          run(oauthKey)
+          run(key)
         }, 3000)
       }
 
@@ -192,20 +197,18 @@ const checkScanStatus = (oauthKey: string) => {
       return
     }
     // 获取SESSDATA
-    try {
-      QRSESSDATA.value = body.data.url.match(/SESSDATA=(\S*)&bili_jct/)[1]
-    } catch (e) {
-      console.error(`返回的url不存在SESSDATA ${e}`)
-      // 20260810 返回的url 已经不带SESSDATA 需从 response 里的set-cookie获取
-      const setCookieList = resHeader['set-cookie']
-      if (Array.isArray(setCookieList)) {
-        const SESSDATACookie = setCookieList.find((str: string) => /^SESSDATA=/.test(str))
-        if (!SESSDATACookie) throw new Error('SESSDATA not found ')
-        QRSESSDATA.value = SESSDATACookie.match(/^SESSDATA=(\S*)/)[1]
-      }
-    }
-    scanStatus.value = 2
+    const urlSESSDATA = body.data.url?.match(/[?&]SESSDATA=([^&]+)/)?.[1]
+    const setCookieList = resHeader['set-cookie']
+    const cookieSESSDATA = Array.isArray(setCookieList)
+      ? setCookieList.find((str: string) => /^SESSDATA=/.test(str))?.match(/^SESSDATA=([^;]+)/)?.[1]
+      : undefined
+    const SESSDATA = urlSESSDATA || cookieSESSDATA
     isCheck.value = false
+    if (!SESSDATA) {
+      message.error('扫码成功，但未获取到 SESSDATA，请重试')
+      return
+    }
+    await login(SESSDATA)
   }
 }
 
@@ -215,6 +218,10 @@ defineExpose({
 </script>
 
 <style scoped lang="less">
+.scan-status {
+  margin-top: 12px;
+  text-align: center;
+}
 .login-box{
   position: relative;
   display: flex;
